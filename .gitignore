@@ -1,0 +1,103 @@
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+*.log
+
+# Virtual environments
+venv/
+.env/
+env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# VSCode / IDE
+.vscode/
+.idea/
+
+# -----------------------------
+# Data Science
+# -----------------------------
+
+# Raw data (large)
+*.tsv
+*.feather
+*.hdf5
+*.h5
+*.pkl
+*.pickle
+*.npz
+*.npy
+
+# Model files
+*.pth
+*.pt
+*.pb
+*.h5
+*.joblib
+*.sav
+*.onnx
+
+# -----------------------------
+# GIS / Raster / Geospatial
+# -----------------------------
+
+# Raster files (LARGE)
+*.tif
+*.tiff
+*.geotiff
+*.vrt
+
+# Raster sidecars
+*.aux
+*.aux.xml
+*.ovr
+*.tfw
+*.wld
+*.rrd
+
+# Vector files
+*.shp
+*.shx
+*.prj
+*.dbf
+*.gpkg
+*.geojson
+*.topojson
+
+# QGIS project cache
+*.qgz~
+.qgis2/
+.qgis3/
+.qgis/
+
+# GDAL temporary files
+*.aux.json
+
+# -----------------------------
+# Misc
+# -----------------------------
+*.zip
+*.tar
+*.gz
+*.7z
+
+# Outputs
+outputs/
+results/
+figures/
+plots/
+cache/
+data/
+temp/
+tmp/
+

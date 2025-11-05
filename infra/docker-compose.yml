@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  # RabbitMQ message broker for Celery
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: firesentry-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP port
+      - "15672:15672"  # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: firesentry
+      RABBITMQ_DEFAULT_PASS: firesentry123
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+
+  # Redis for Celery result backend
+  redis:
+    image: redis:7-alpine
+    container_name: firesentry-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # PostgreSQL database (optional for future use)
+  postgres:
+    image: postgres:15-alpine
+    container_name: firesentry-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: firesentry
+      POSTGRES_USER: firesentry
+      POSTGRES_PASSWORD: firesentry123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+
+  # Celery worker (optional - for async tasks)
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.celery
+    container_name: firesentry-celery-worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ../:/app
+      - ../data:/app/data
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+    command: celery -A api.celery_app worker --loglevel=info
+
+  # Celery beat scheduler (optional - for periodic tasks)
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.celery
+    container_name: firesentry-celery-beat
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ../:/app
+      - ../data:/app/data
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+    command: celery -A api.celery_app beat --loglevel=info
+
+  # Flower monitoring (optional - for Celery monitoring)
+  flower:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.celery
+    container_name: firesentry-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - firesentry-network
+    restart: unless-stopped
+    command: celery -A api.celery_app flower --port=5555
+
+volumes:
+  rabbitmq_data:
+  redis_data:
+  postgres_data:
+
+networks:
+  firesentry-network:
+    driver: bridge
+
+
+

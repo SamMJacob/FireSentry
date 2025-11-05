@@ -1,0 +1,20 @@
+{
+  "selected_features": [
+    "ndvi_max",
+    "prec_mean",
+    "prec_max",
+    "prec_sum",
+    "elevation",
+    "ndvi_median",
+    "evi_max",
+    "ndvi_mean",
+    "evi_median"
+  ],
+  "num_features": 9,
+  "parameters": {
+    "k_mi": 12,
+    "n_repeats": 10,
+    "cv_folds": 5,
+    "random_state": 42
+  }
+}

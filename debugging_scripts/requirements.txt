@@ -1,0 +1,46 @@
+# Core ML and Data Science
+numpy
+pandas
+scikit-learn
+auto-sklearn
+imbalanced-learn
+joblib
+
+# Geospatial Processing
+rasterio
+xarray
+geopandas
+pyproj
+shapely
+fiona
+
+# Earth Observation Data Access
+earthaccess
+requests
+
+# API Framework
+fastapi
+uvicorn
+pydantic
+
+# Visualization
+matplotlib
+seaborn
+plotly
+
+# PPTX Generation
+python-pptx
+
+# Development and Testing
+pytest
+pytest-cov
+black
+flake8
+
+# Optional: Celery for async tasks
+celery
+redis
+pika
+
+# Environment management
+python-dotenv
