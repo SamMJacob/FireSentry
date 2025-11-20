@@ -96,7 +96,7 @@ async def startup_event():
     try:
         logger.info("Loading trained model...")
         trainer = FirePredictionTrainer()
-        trainer.load_model()
+        trainer.load_model("models/")  # Load from models/ directory
         logger.info("Model loaded successfully")
         
         logger.info("Initializing feature pipeline...")
@@ -155,10 +155,11 @@ async def predict_fire_risk(request: PredictRequest):
         logger.info(f"Building features for ({request.lat}, {request.lon}) on {pred_date}")
         
         # Create a single-row DataFrame for feature extraction
+        # Convert date to datetime for DTW calculation (DTW expects datetime objects)
         point_df = pd.DataFrame({
             'lat': [request.lat],
             'lon': [request.lon],
-            'date': [pred_date]
+            'date': [pd.to_datetime(pred_date)]  # Convert date to datetime
         })
         
         # Calculate DTW for this point
@@ -174,8 +175,18 @@ async def predict_fire_risk(request: PredictRequest):
             point_with_dtw.iloc[0]['dtw_end']
         )
         
-        # Create feature DataFrame
+        # Create feature DataFrame with all required columns
+        # Ensure all feature columns are present (even if NaN)
         feature_df = pd.DataFrame([features])
+        
+        # Ensure all expected feature columns are present
+        expected_columns = pipeline.feature_columns
+        for col in expected_columns:
+            if col not in feature_df.columns:
+                feature_df[col] = np.nan
+        
+        # Reorder columns to match expected order
+        feature_df = feature_df[expected_columns]
         
         # Make prediction
         predictions, probabilities = trainer.predict(feature_df)
@@ -276,6 +287,239 @@ async def get_feature_importance():
         "feature_names": trainer.feature_names
     }
 
+# Detailed metrics endpoint
+@app.get("/model/detailed_metrics")
+async def get_detailed_metrics():
+    """Get detailed evaluation metrics including confusion matrix and ROC curve."""
+    if trainer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        from sklearn.metrics import confusion_matrix, roc_curve
+        from pathlib import Path as FilePath
+        
+        # Check if feature file exists
+        feature_file = FilePath("data/processed/features_5000.parquet")
+        if not feature_file.exists():
+            raise HTTPException(status_code=404, detail="Training data not found")
+        
+        logger.info("Loading test data for detailed metrics...")
+        
+        # Load data
+        df = pd.read_parquet(feature_file)
+        
+        # Separate features and target
+        feature_columns = [col for col in df.columns if col not in ['lat', 'lon', 'date', 'target', 'is_fire', 'dtw_start', 'dtw_end']]
+        X = df[feature_columns].copy()
+        
+        # Handle target column
+        if 'target' in df.columns:
+            y = df['target'].copy()
+        elif 'is_fire' in df.columns:
+            y = df['is_fire'].copy()
+        else:
+            raise HTTPException(status_code=500, detail="No target column found")
+        
+        # Handle missing values
+        X = X.fillna(0).replace([np.inf, -np.inf], 0)
+        y = y.astype(int)
+        
+        # Apply temporal split (same as training)
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            split_date = df['date'].quantile(0.8)
+            test_mask = df['date'] >= split_date
+            
+            X_test = X[test_mask]
+            y_test = y[test_mask]
+        else:
+            # Fallback to last 20% if no date column
+            split_idx = int(len(X) * 0.8)
+            X_test = X.iloc[split_idx:]
+            y_test = y.iloc[split_idx:]
+        
+        logger.info(f"Test set size: {len(X_test)} samples")
+        
+        # Make predictions
+        predictions, probabilities = trainer.predict(X_test)
+        
+        # Calculate confusion matrix
+        cm = confusion_matrix(y_test, predictions)
+        
+        # Calculate ROC curve
+        fpr, tpr, thresholds = roc_curve(y_test, probabilities)
+        
+        # Calculate additional metrics
+        from sklearn.metrics import precision_recall_curve, average_precision_score
+        precision_curve, recall_curve, pr_thresholds = precision_recall_curve(y_test, probabilities)
+        avg_precision = average_precision_score(y_test, probabilities)
+        
+        logger.info("Detailed metrics calculated successfully")
+        
+        # Handle NaN/Inf values for JSON serialization
+        def clean_for_json(arr):
+            """Replace NaN and Inf values with valid numbers."""
+            arr = np.array(arr)
+            arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+            return arr.tolist()
+        
+        # Normalize confusion matrix safely
+        cm_normalized = cm.astype('float')
+        row_sums = cm.sum(axis=1)[:, np.newaxis]
+        row_sums[row_sums == 0] = 1  # Avoid division by zero
+        cm_normalized = cm_normalized / row_sums
+        
+        return {
+            "confusion_matrix": cm.tolist(),
+            "confusion_matrix_normalized": clean_for_json(cm_normalized),
+            "roc_curve": {
+                "fpr": clean_for_json(fpr),
+                "tpr": clean_for_json(tpr),
+                "thresholds": clean_for_json(thresholds)
+            },
+            "precision_recall_curve": {
+                "precision": clean_for_json(precision_curve),
+                "recall": clean_for_json(recall_curve),
+                "thresholds": clean_for_json(pr_thresholds),
+                "average_precision": float(avg_precision) if not np.isnan(avg_precision) else 0.0
+            },
+            "test_samples": len(y_test),
+            "class_distribution": {
+                "negative": int((y_test == 0).sum()),
+                "positive": int((y_test == 1).sum())
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating detailed metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to calculate detailed metrics: {str(e)}")
+
+# Auto-sklearn ensemble details endpoint
+@app.get("/model/ensemble_details")
+async def get_ensemble_details():
+    """Get detailed information about Auto-sklearn ensemble models."""
+    if trainer is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        model_type = trainer.model_artifacts.get('model_type', 'unknown')
+        
+        if model_type != 'autosklearn':
+            return {
+                "ensemble_available": False,
+                "model_type": model_type,
+                "message": "Ensemble details only available for Auto-sklearn models"
+            }
+        
+        ensemble_info = {
+            "ensemble_available": True,
+            "model_type": "autosklearn",
+            "models": [],
+            "ensemble_statistics": {}
+        }
+        
+        # Get ensemble models and weights
+        try:
+            models_with_weights = trainer.model.get_models_with_weights()
+            logger.info(f"Found {len(models_with_weights)} models in ensemble")
+            
+            for idx, (weight, model) in enumerate(models_with_weights):
+                model_info = {
+                    "rank": idx + 1,
+                    "weight": float(weight),
+                    "model_id": str(model),
+                    "estimator_name": "Unknown",
+                    "hyperparameters": {}
+                }
+                
+                # Try to extract model details
+                try:
+                    # Get the actual sklearn pipeline
+                    if hasattr(model, 'steps'):
+                        # It's a pipeline - dig into Auto-sklearn structure
+                        for step_name, step_model in model.steps:
+                            # Auto-sklearn uses 'classifier' for the main estimator
+                            if step_name in ['estimator', 'classifier']:
+                                # Check if it's a ClassifierChoice (Auto-sklearn wrapper)
+                                if hasattr(step_model, 'choice') and hasattr(step_model.choice, 'estimator'):
+                                    # Get the actual estimator inside
+                                    actual_estimator = step_model.choice.estimator
+                                    model_info["estimator_name"] = type(actual_estimator).__name__
+                                    
+                                    # Try to get parameters from the actual estimator
+                                    if hasattr(actual_estimator, 'get_params'):
+                                        params = actual_estimator.get_params()
+                                        important_params = {k: v for k, v in params.items() 
+                                                           if not k.startswith('_') and v is not None 
+                                                           and not callable(v)}
+                                        model_info["hyperparameters"] = {k: str(v) for k, v in important_params.items()}
+                                else:
+                                    # Regular sklearn estimator
+                                    model_info["estimator_name"] = type(step_model).__name__
+                                    if hasattr(step_model, 'get_params'):
+                                        params = step_model.get_params()
+                                        important_params = {k: v for k, v in params.items() 
+                                                           if not k.startswith('_') and v is not None 
+                                                           and not callable(v)}
+                                        model_info["hyperparameters"] = {k: str(v) for k, v in important_params.items()}
+                    else:
+                        model_info["estimator_name"] = type(model).__name__
+                        if hasattr(model, 'get_params'):
+                            params = model.get_params()
+                            important_params = {k: v for k, v in params.items() 
+                                               if not k.startswith('_') and v is not None 
+                                               and not callable(v)}
+                            model_info["hyperparameters"] = {k: str(v) for k, v in important_params.items()}
+                except Exception as e:
+                    logger.warning(f"Could not extract details for model {idx}: {e}")
+                    model_info["estimator_name"] = type(model).__name__
+                    logger.warning(f"Model structure: {model}")
+                
+                ensemble_info["models"].append(model_info)
+            
+            # Calculate ensemble statistics
+            total_weight = sum(m["weight"] for m in ensemble_info["models"])
+            ensemble_info["ensemble_statistics"] = {
+                "total_models": len(ensemble_info["models"]),
+                "total_weight": float(total_weight),
+                "top_model_weight": float(ensemble_info["models"][0]["weight"]) if ensemble_info["models"] else 0,
+                "model_types_count": {}
+            }
+            
+            # Count model types
+            for model in ensemble_info["models"]:
+                model_type = model["estimator_name"]
+                if model_type in ensemble_info["ensemble_statistics"]["model_types_count"]:
+                    ensemble_info["ensemble_statistics"]["model_types_count"][model_type] += 1
+                else:
+                    ensemble_info["ensemble_statistics"]["model_types_count"][model_type] = 1
+            
+        except AttributeError:
+            logger.warning("Could not get ensemble details - model may not be Auto-sklearn")
+            ensemble_info["models"].append({
+                "rank": 1,
+                "weight": 1.0,
+                "estimator_name": type(trainer.model).__name__,
+                "hyperparameters": {}
+            })
+        
+        # Try to get leaderboard
+        try:
+            leaderboard = trainer.model.leaderboard()
+            if leaderboard is not None and len(leaderboard) > 0:
+                ensemble_info["leaderboard"] = leaderboard.head(10).to_dict('records')
+        except:
+            pass
+        
+        logger.info("Ensemble details retrieved successfully")
+        return ensemble_info
+        
+    except Exception as e:
+        logger.error(f"Error getting ensemble details: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get ensemble details: {str(e)}")
+
 # Root endpoint
 @app.get("/")
 async def root():
@@ -289,6 +533,8 @@ async def root():
             "predict_batch": "/predict/batch",
             "model_info": "/model/info",
             "feature_importance": "/model/importance",
+            "detailed_metrics": "/model/detailed_metrics",
+            "ensemble_details": "/model/ensemble_details",
             "docs": "/docs"
         }
     }

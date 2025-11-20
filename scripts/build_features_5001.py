@@ -32,7 +32,6 @@ from datetime import datetime
 from tqdm import tqdm
 import json
 import time
-import joblib
 from scipy.spatial import cKDTree
 from multiprocessing import Pool, cpu_count
 from functools import partial
@@ -120,15 +119,15 @@ class FireSentry5000Builder:
         self.pipeline = OptimizedFeaturePipeline()
         self.trainer = FirePredictionTrainer()
         
-        # Set number of parallel jobs (BALANCED: speed + safety)
+        # Set number of parallel jobs (SAFER for system stability)
         if n_jobs is None:
             total_cores = cpu_count()
             if total_cores >= 12:
-                # For 12+ cores: Use 6 cores (balance between speed and safety)
-                self.n_jobs = max(1, min(6, total_cores - 2))
+                # For 12+ cores: Use 5 cores (safer for I/O, prevents system freeze)
+                self.n_jobs = max(1, min(5, total_cores - 3))
             elif total_cores >= 8:
-                # For 8-11 cores: Use 5 cores
-                self.n_jobs = max(1, min(5, total_cores - 2))
+                # For 8-11 cores: Use 4 cores
+                self.n_jobs = max(1, min(4, total_cores - 2))
             else:
                 # For <8 cores: Conservative (leave 2 free)
                 self.n_jobs = max(1, min(3, total_cores - 2))
@@ -138,7 +137,7 @@ class FireSentry5000Builder:
         logger.info(f"FireSentry 5000-Point Builder initialized")
         logger.info(f"🚀 Parallel processing enabled: {self.n_jobs} cores (out of {cpu_count()} total)")
         logger.info(f"💾 Memory-optimized mode: ~1.5-2GB RAM per process")
-        logger.info(f"⚡ Optimized for speed: Reduced monitoring overhead")
+        logger.info(f"🛡️  Safe mode: Reduced workers to prevent I/O saturation and system freezes")
     
     def generate_pseudo_fire_points_optimized(self, fire_points: pd.DataFrame, 
                                             ratio: float = 1.0) -> pd.DataFrame:
@@ -187,25 +186,11 @@ class FireSentry5000Builder:
         # Validate date range
         start_date = fire_points['date'].min()
         end_date = fire_points['date'].max()
-        logger.info(f"Fire points date range: {start_date.date()} to {end_date.date()}")
+        logger.info(f"Date range: {start_date.date()} to {end_date.date()}")
         
         if pd.isna(start_date) or pd.isna(end_date):
             logger.error("Invalid date range in fire points data")
             return pd.DataFrame()
-        
-        # CRITICAL FIX: Match temporal distribution of fire points
-        # This prevents model from learning "month X = fire" by ensuring both classes
-        # have points in the same months with similar distribution
-        logger.info(f"Fire points date range: {start_date.date()} to {end_date.date()}")
-        
-        # Get monthly distribution of fire points
-        fire_months = fire_points['date'].dt.month.value_counts()
-        logger.info(f"Fire point monthly distribution: {dict(fire_months)}")
-        
-        # Use same date range as fire points (no wet season data available)
-        # But match the monthly distribution to prevent temporal leakage
-        logger.info("⚠️  Matching pseudo point monthly distribution to fire points")
-        logger.info("⚠️  This ensures both classes span same months (prevents temporal leakage)")
         
         # Create spatial index for fast distance queries
         logger.info("Building spatial index for fire points...")
@@ -218,10 +203,6 @@ class FireSentry5000Builder:
         
         logger.info(f"Generating {num_pseudo} pseudo points with spatial indexing...")
         
-        # Pre-calculate monthly sampling probabilities
-        month_probs = fire_months / fire_months.sum()
-        logger.info(f"Monthly sampling probabilities: {dict(month_probs)}")
-        
         with tqdm(total=num_pseudo, desc="Pseudo Points", unit="points") as pbar:
             while len(pseudo_points) < num_pseudo and attempts < max_attempts:
                 attempts += 1
@@ -230,18 +211,11 @@ class FireSentry5000Builder:
                 lat = np.random.uniform(bbox_s, bbox_n)
                 lon = np.random.uniform(bbox_w, bbox_e)
                 
-                # Sample date matching fire point monthly distribution
-                # Select month based on fire point distribution
-                selected_month = np.random.choice(month_probs.index, p=month_probs.values)
-                
-                # Get all dates in that month from fire points
-                month_dates = fire_points[fire_points['date'].dt.month == selected_month]['date'].unique()
-                if len(month_dates) > 0:
-                    random_date = np.random.choice(month_dates)
-                else:
-                    # Fallback: random date in range
-                    date_range_days = (end_date - start_date).days
-                    random_date = start_date + pd.Timedelta(days=np.random.randint(0, date_range_days))
+                # Random date within the time range (using pre-calculated range)
+                date_range_days = (end_date - start_date).days
+                random_date = start_date + pd.Timedelta(
+                    days=np.random.randint(0, date_range_days)
+                )
                 
                 # Validate random_date
                 if pd.isna(random_date):
@@ -256,10 +230,8 @@ class FireSentry5000Builder:
                 if min_distance_km < 5.0:  # Too close to actual fire
                     continue
                 
-                # CRITICAL FIX: DTW will be calculated properly later (not random)
-                # This is just a placeholder - will be recalculated in build_feature_matrix_with_progress
-                # Using proper precipitation-based method
-                dtw_days = np.random.randint(7, 30)  # Temporary placeholder (will be replaced)
+                # Calculate DTW window for pseudo point (non-fire points get random window)
+                dtw_days = np.random.randint(1, 15)  # Random window 1-14 days
                 dtw_start = random_date - pd.Timedelta(days=dtw_days)
                 
                 # Validate DTW dates
@@ -420,15 +392,8 @@ class FireSentry5000Builder:
         fire_points_with_dtw = self.calculate_dtw_optimized(fire_points)
         logger.info(f"DTW calculated for {len(fire_points_with_dtw)} real fire points")
         
-        # CRITICAL FIX: Calculate DTW for pseudo points using SAME method (not random)
-        # This prevents model from learning "random DTW = no fire" vs "proper DTW = fire"
-        logger.info("Calculating DTW windows for pseudo points (OPTIMIZED method)...")
-        logger.info("⚠️  Using same precipitation-based DTW method as fire points")
-        pseudo_points_with_dtw = self.calculate_dtw_optimized(pseudo_points)
-        logger.info(f"DTW calculated for {len(pseudo_points_with_dtw)} pseudo points")
-        
-        # Combine all points (both now have proper DTW)
-        all_points = pd.concat([fire_points_with_dtw, pseudo_points_with_dtw], ignore_index=True)
+        # Combine all points (pseudo points already have DTW from generation)
+        all_points = pd.concat([fire_points_with_dtw, pseudo_points], ignore_index=True)
         logger.info(f"Total points to process: {len(all_points)}")
         
         # Initialize feature matrix (24 features from base paper - no TRI)
@@ -464,37 +429,38 @@ class FireSentry5000Builder:
         
         with Pool(processes=self.n_jobs) as pool:
             with tqdm(total=total_points, desc="Feature Extraction (Parallel)", unit="points") as pbar:
-                # Use larger chunksize to reduce overhead (fewer task queue operations)
-                # For 6 workers: 150/6 = 25, but we'll use 30-40 for better efficiency
-                chunksize = max(10, min(40, 200 // self.n_jobs))  # 10-40 chunks (larger = less overhead)
-                logger.info(f"📦 Using chunksize={chunksize} for optimal parallel efficiency")
+                # Use larger chunksize to reduce I/O overhead and task queue operations
+                # This reduces system calls and prevents I/O saturation
+                chunksize = max(5, min(20, 150 // self.n_jobs))  # 5-20 chunks (larger = fewer I/O ops)
+                logger.info(f"📦 Using chunksize={chunksize} to reduce I/O overhead")
                 
                 for i, result in enumerate(pool.imap_unordered(extract_features_worker, tasks, chunksize=chunksize)):
                     results.append(result)
                     pbar.update(1)
                     
-                    # MEMORY & SYSTEM MONITORING every 100 points (reduced frequency for speed)
-                    if memory_available and i % 100 == 0 and i > 0:
+                    # MEMORY & SYSTEM MONITORING every 50 points
+                    if memory_available and i % 50 == 0:
                         memory = psutil.virtual_memory()
-                        cpu_percent = psutil.cpu_percent(interval=0.05)  # Faster check
+                        cpu_percent = psutil.cpu_percent(interval=0.1)
                         
-                        logger.info(f"💾 Memory: {memory.percent:.1f}% | CPU: {cpu_percent:.1f}% | Progress: {i}/{total_points} ({i/total_points*100:.1f}%)")
+                        logger.info(f"💾 Memory: {memory.percent:.1f}% | CPU: {cpu_percent:.1f}% | Progress: {i}/{total_points}")
                         
                         # MEMORY WARNINGS
-                        if memory.percent > 85:
+                        if memory.percent > 80:
                             logger.warning(f"⚠️  HIGH MEMORY USAGE: {memory.percent:.1f}% - monitoring closely")
-                        if memory.percent > 92:
+                        if memory.percent > 90:
                             logger.error(f"🚨 CRITICAL MEMORY USAGE: {memory.percent:.1f}% - system may crash soon!")
                             logger.error(f"🛑 Consider stopping and reducing parallel workers!")
                         
-                        # CPU OVERHEATING WARNING (only if consistently high)
-                        if cpu_percent > 98:
-                            logger.warning(f"🔥 VERY HIGH CPU USAGE: {cpu_percent:.1f}% - brief pause")
-                            time.sleep(0.2)  # Shorter pause
+                        # CPU OVERHEATING WARNING (prevents system freeze)
+                        if cpu_percent > 95:
+                            logger.warning(f"🔥 HIGH CPU USAGE: {cpu_percent:.1f}% - may cause system freeze")
+                            logger.warning(f"💤 Adding brief pause to prevent I/O saturation...")
+                            time.sleep(0.5)  # Brief pause to let system catch up
                     
-                    # Reduced I/O throttling: Only every 200 points (was 100)
-                    if i > 0 and i % 200 == 0:
-                        time.sleep(0.05)  # Shorter pause (was 0.1)
+                    # Periodic I/O throttling: Small pause every 100 points to prevent I/O saturation
+                    if i > 0 and i % 100 == 0:
+                        time.sleep(0.1)  # Tiny pause to prevent I/O queue buildup
         
         # Convert results to DataFrame
         logger.info("Converting results to feature matrix...")
@@ -600,97 +566,6 @@ class FireSentry5000Builder:
             logger.error(f"Model training failed: {e}")
             return False
     
-    def _get_selected_features(self, trainer):
-        """
-        Dynamically detect selected features from model or feature spec file.
-        Returns list of feature names that the model expects.
-        
-        Args:
-            trainer: FirePredictionTrainer instance with loaded model
-            
-        Returns:
-            List of selected feature names
-        """
-        # Method 1: Try to get from trainer's feature_names (if available)
-        if hasattr(trainer, 'feature_names') and trainer.feature_names:
-            logger.info(f"✅ Loaded {len(trainer.feature_names)} features from trainer")
-            logger.info(f"Features: {trainer.feature_names}")
-            return trainer.feature_names
-        
-        # Method 2: Try to load from feature_spec.json
-        feature_spec_paths = [
-            Path("models/feature_spec.json"),
-            Path("model/artifacts/feature_spec.json"),
-        ]
-        
-        for spec_path in feature_spec_paths:
-            if spec_path.exists():
-                try:
-                    with open(spec_path, 'r') as f:
-                        spec = json.load(f)
-                        if 'selected_features' in spec:
-                            features = spec['selected_features']
-                            logger.info(f"✅ Loaded {len(features)} features from {spec_path}")
-                            logger.info(f"Features: {features}")
-                            return features
-                except Exception as e:
-                    logger.debug(f"Could not load {spec_path}: {e}")
-        
-        # Method 3: Try to load from model_artifacts.joblib
-        artifacts_paths = [
-            Path("models/model_artifacts.joblib"),
-            Path("model/artifacts/model_artifacts.joblib"),
-        ]
-        
-        for artifacts_path in artifacts_paths:
-            if artifacts_path.exists():
-                try:
-                    artifacts = joblib.load(artifacts_path)
-                    if 'feature_names' in artifacts:
-                        features = artifacts['feature_names']
-                        logger.info(f"✅ Loaded {len(features)} features from {artifacts_path}")
-                        logger.info(f"Features: {features}")
-                        return features
-                except Exception as e:
-                    logger.debug(f"Could not load {artifacts_path}: {e}")
-        
-        # Method 4: Try to extract from Auto-sklearn model's ColumnTransformer
-        try:
-            if hasattr(trainer.model, 'automl_') and hasattr(trainer.model.automl_, 'InputValidator'):
-                input_validator = trainer.model.automl_.InputValidator
-                if hasattr(input_validator, 'feature_validator'):
-                    feature_validator = input_validator.feature_validator
-                    if hasattr(feature_validator, 'column_transformer'):
-                        ct = feature_validator.column_transformer
-                        # Try multiple ways to get feature names
-                        if hasattr(ct, 'feature_names_in_'):
-                            features = list(ct.feature_names_in_)
-                            logger.info(f"✅ Extracted {len(features)} features from model (feature_names_in_)")
-                            logger.info(f"Features: {features}")
-                            return features
-                        # Alternative: try to get from transformers
-                        elif hasattr(ct, 'transformers_'):
-                            # Extract feature names from transformers
-                            feature_names = []
-                            for name, transformer, columns in ct.transformers_:
-                                if isinstance(columns, list):
-                                    feature_names.extend(columns)
-                                elif hasattr(columns, '__iter__') and not isinstance(columns, str):
-                                    feature_names.extend(list(columns))
-                            if feature_names:
-                                logger.info(f"✅ Extracted {len(feature_names)} features from model (transformers_)")
-                                logger.info(f"Features: {feature_names}")
-                                return feature_names
-        except Exception as e:
-            logger.debug(f"Could not extract features from model: {e}")
-        
-        # Method 5: Fallback to old hardcoded 9 features (for backward compatibility)
-        logger.warning("⚠️  Could not detect features from model/spec, using fallback (9 features)")
-        return [
-            'ndvi_max', 'prec_mean', 'prec_max', 'prec_sum', 'elevation', 
-            'ndvi_median', 'evi_max', 'ndvi_mean', 'evi_median'
-        ]
-    
     def evaluate_model(self):
         """Evaluate the trained model."""
         logger.info("Evaluating model...")
@@ -745,22 +620,18 @@ class FireSentry5000Builder:
             # Apply feature selection to match training (CRITICAL FIX)
             logger.info("Applying feature selection to evaluation data...")
             
-            # Dynamically detect selected features from model or artifacts
-            selected_features = self._get_selected_features(trainer)
-            
-            # Verify all selected features exist in the data
-            missing_features = set(selected_features) - set(X_train.columns)
-            if missing_features:
-                logger.error(f"❌ Missing features in data: {missing_features}")
-                logger.error(f"Expected {len(selected_features)} features, but {len(selected_features) - len(missing_features)} are available")
-                logger.error(f"Available features: {sorted(X_train.columns.tolist())}")
-                raise ValueError(f"Model expects {len(selected_features)} features but some are missing in data")
+            # Use the EXACT same features that were selected during training
+            # (Don't re-run MSFS - use the saved results to avoid different feature selection)
+            selected_features = [
+                'ndvi_max', 'prec_mean', 'prec_max', 'prec_sum', 'elevation', 
+                'ndvi_median', 'evi_max', 'ndvi_mean', 'evi_median'
+            ]
             
             X_train_selected = X_train[selected_features]
             X_test_selected = X_test[selected_features]
             
             logger.info(f"Evaluation data shapes - Train: {X_train_selected.shape}, Test: {X_test_selected.shape}")
-            logger.info(f"✅ Using {len(selected_features)} selected features: {selected_features}")
+            logger.info(f"Using SAVED selected features: {selected_features}")
             
             # Scale features to match training
             from sklearn.preprocessing import StandardScaler

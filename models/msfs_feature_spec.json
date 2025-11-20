@@ -1,16 +1,18 @@
 {
   "selected_features": [
-    "ndvi_max",
-    "prec_mean",
-    "prec_max",
-    "prec_sum",
     "elevation",
-    "ndvi_median",
-    "evi_max",
     "ndvi_mean",
-    "evi_median"
+    "ndvi_median",
+    "evi_median",
+    "evi_max",
+    "evi_mean",
+    "ndvi_max",
+    "lst_min",
+    "lst_median",
+    "lst_mean",
+    "ndwi_mean"
   ],
-  "num_features": 9,
+  "num_features": 11,
   "parameters": {
     "k_mi": 12,
     "n_repeats": 10,
